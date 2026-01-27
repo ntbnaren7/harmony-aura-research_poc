@@ -97,6 +97,7 @@ class MachineListResponse(BaseModel):
     """Response with list of machines"""
     machines: List[MachineResponse]
     total: int
+    last_esp32_payload: Optional[dict] = None
 
 
 class MachineHistoryResponse(BaseModel):

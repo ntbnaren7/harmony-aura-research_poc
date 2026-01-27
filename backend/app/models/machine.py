@@ -3,8 +3,7 @@ Machine and MachineTelemetry database models
 """
 import uuid
 from datetime import datetime
-from sqlalchemy import Column, String, Integer, Float, Boolean, DateTime, ForeignKey
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy import Column, String, Integer, Float, Boolean, DateTime, ForeignKey, Uuid
 from sqlalchemy.orm import relationship
 import enum
 
@@ -33,7 +32,7 @@ class Machine(Base):
     """Machine registration table"""
     __tablename__ = "machines"
     
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id = Column(Uuid, primary_key=True, default=uuid.uuid4)
     machine_id = Column(String(20), unique=True, nullable=False, index=True)
     name = Column(String(100), nullable=False)
     type = Column(String(20), nullable=False)  # CRANE, EXCAVATOR, etc.
@@ -50,7 +49,7 @@ class MachineTelemetry(Base):
     """Machine telemetry from IoT sensors"""
     __tablename__ = "machine_telemetry"
     
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id = Column(Uuid, primary_key=True, default=uuid.uuid4)
     machine_id = Column(String(20), ForeignKey("machines.machine_id"), nullable=False, index=True)
     
     # Status

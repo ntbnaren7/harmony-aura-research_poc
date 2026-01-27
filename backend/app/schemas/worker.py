@@ -85,6 +85,7 @@ class WorkerListResponse(BaseModel):
     """Response with list of workers"""
     workers: List[WorkerResponse]
     total: int
+    last_esp32_payload: Optional[dict] = None
 
 
 class WorkerHistoryResponse(BaseModel):

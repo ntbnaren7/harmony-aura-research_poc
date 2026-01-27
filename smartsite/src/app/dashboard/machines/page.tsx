@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
     Cpu,
@@ -10,6 +10,11 @@ import {
     AlertCircle,
     RefreshCw,
     Activity,
+    Play,
+    Settings,
+    Wifi,
+    X,
+    Square,
 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -100,11 +105,44 @@ function getStatusStyles(status: MachineStatus) {
 export default function MachinesPage() {
     const [machines, setMachines] = useState<MachineData[]>([]);
     const [isLoading, setIsLoading] = useState(true);
+    const [isSimulating, setIsSimulating] = useState(false);
+    const [isRefreshing, setIsRefreshing] = useState(false);
+    const [simulationMode, setSimulationMode] = useState<"good" | "fair" | "poor" | null>(null);
+    const [changedMachines, setChangedMachines] = useState<Set<string>>(new Set());
+    const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
     const [selectedMachine, setSelectedMachine] = useState<MachineData | null>(null);
     const [isModalOpen, setIsModalOpen] = useState(false);
 
+    // ESP32 configuration
+    // ESP32 configuration
+    const [esp32Url, setEsp32Url] = useState("");
+    const [showEsp32Config, setShowEsp32Config] = useState(false);
+    const [lastSentData, setLastSentData] = useState<{
+        timestamp: Date;
+        mode: string;
+        vibration: number;
+        temperature: number;
+        machineCount: number;
+        fullPayload?: any;
+    } | null>(null);
+
+    // Persist ESP32 URL
+    useEffect(() => {
+        const saved = localStorage.getItem("esp32_url");
+        if (saved) setEsp32Url(saved);
+    }, []);
+
+    const handleEsp32UrlChange = (url: string) => {
+        setEsp32Url(url);
+        localStorage.setItem("esp32_url", url);
+    };
+
+    // Store previous machines for change detection
+    const prevMachinesRef = useRef<MachineData[]>([]);
+
     // Fetch machines from API
     const fetchMachines = useCallback(async () => {
+        setIsRefreshing(true);
         try {
             const response = await fetch(`${API_BASE_URL}/api/machines`);
 
@@ -116,12 +154,38 @@ export default function MachinesPage() {
 
             if (data.machines) {
                 const transformedMachines = data.machines.map(transformMachineResponse);
+
+                // Detect which machines have changed values
+                const changed = new Set<string>();
+                transformedMachines.forEach((machine: MachineData) => {
+                    const prev = prevMachinesRef.current.find(m => m.machineId === machine.machineId);
+                    if (prev && (
+                        prev.healthScore !== machine.healthScore ||
+                        prev.temperature !== machine.temperature ||
+                        prev.failureProbability !== machine.failureProbability ||
+                        prev.status !== machine.status
+                    )) {
+                        changed.add(machine.machineId);
+                    }
+                });
+
+                if (changed.size > 0) {
+                    setChangedMachines(changed);
+                    // Clear highlights after animation completes
+                    setTimeout(() => setChangedMachines(new Set()), 1500);
+                }
+
+                prevMachinesRef.current = transformedMachines;
                 setMachines(transformedMachines);
             }
+            setLastUpdated(new Date());
             setIsLoading(false);
         } catch (err) {
             console.error("Failed to fetch machines:", err);
             setIsLoading(false);
+        } finally {
+            // Brief delay to show refresh animation
+            setTimeout(() => setIsRefreshing(false), 300);
         }
     }, []);
 
@@ -129,11 +193,63 @@ export default function MachinesPage() {
         // Initial fetch
         fetchMachines();
 
-        // Set up periodic updates
-        const interval = setInterval(fetchMachines, 5000);
+        // Set up periodic updates (every 2.5 seconds)
+        const interval = setInterval(fetchMachines, 2500);
 
         return () => clearInterval(interval);
     }, [fetchMachines]);
+
+    useEffect(() => {
+        if (!simulationMode) {
+            setLastSentData(null);
+            return;
+        }
+
+        const simulateAndRefresh = async () => {
+            try {
+                // Build URL with optional ESP32 parameter and target state
+                let url = `${API_BASE_URL}/api/machines/simulate-all?target_state=${simulationMode}`;
+                if (esp32Url.trim()) {
+                    url += `&esp32_url=${encodeURIComponent(esp32Url.trim())}`;
+                }
+
+                const response = await fetch(url, {
+                    method: "POST",
+                });
+
+                if (response.ok) {
+                    const data = await response.json();
+                    if (data.machines) {
+                        const transformed = data.machines.map(transformMachineResponse);
+                        setMachines(transformed);
+
+                        // Update visual status
+                        if (transformed.length > 0) {
+                            const sample = transformed[0];
+                            setLastSentData({
+                                timestamp: new Date(),
+                                mode: simulationMode,
+                                vibration: sample.vibrationRms,
+                                temperature: sample.temperature,
+                                machineCount: transformed.length,
+                                fullPayload: data.last_esp32_payload
+                            });
+                        }
+                    }
+                }
+            } catch (err) {
+                console.error("Auto-simulation failed:", err);
+            }
+        };
+
+        // Simulate immediately when enabled/changed
+        simulateAndRefresh();
+
+        // Then simulate every 2.5 seconds
+        const interval = setInterval(simulateAndRefresh, 2500);
+
+        return () => clearInterval(interval);
+    }, [simulationMode, esp32Url]);
 
     const handleCardClick = (machine: MachineData) => {
         setSelectedMachine(machine);
@@ -159,6 +275,45 @@ export default function MachinesPage() {
         });
     };
 
+
+    const handleSimulate = async () => {
+        setIsSimulating(true);
+        try {
+            // Build URL with optional ESP32 parameter
+            let url = `${API_BASE_URL}/api/machines/simulate-all`;
+            if (esp32Url.trim()) {
+                url += `?esp32_url=${encodeURIComponent(esp32Url.trim())}`;
+            }
+
+            const response = await fetch(url, {
+                method: "POST",
+            });
+
+            if (!response.ok) {
+                throw new Error(`API error: ${response.status}`);
+            }
+
+            const data = await response.json();
+
+            if (data.machines) {
+                const transformedMachines = data.machines.map(transformMachineResponse);
+                setMachines(transformedMachines);
+            }
+
+            const esp32Message = esp32Url.trim() ? " (sent to ESP32)" : "";
+            toast.success("Simulation Complete", {
+                description: `Generated telemetry for ${data.total} machines${esp32Message}`,
+            });
+        } catch (err) {
+            console.error("Simulation failed:", err);
+            toast.error("Simulation Failed", {
+                description: "Could not generate simulated data",
+            });
+        } finally {
+            setIsSimulating(false);
+        }
+    };
+
     // Count by status
     const operationalCount = machines.filter(m => m.status === "OPERATIONAL").length;
     const warningCount = machines.filter(m => m.status === "WARNING").length;
@@ -180,17 +335,193 @@ export default function MachinesPage() {
                     </div>
                 </div>
 
-                <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={handleRefresh}
-                    disabled={isLoading}
-                    className="border-white/20 text-white hover:bg-white/10"
-                >
-                    <RefreshCw className={cn("h-4 w-4 mr-2", isLoading && "animate-spin")} />
-                    Refresh
-                </Button>
+                <div className="flex items-center gap-3">
+                    {/* Live indicator */}
+                    <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-green-500/10 border border-green-500/20">
+                        <div className={cn(
+                            "h-2 w-2 rounded-full bg-green-500",
+                            isRefreshing ? "animate-ping" : "animate-pulse"
+                        )} />
+                        <span className="text-xs font-medium text-green-400">LIVE</span>
+                    </div>
+
+                    {/* Simulation Controls - 3 colored buttons */}
+                    <div className="flex items-center gap-1 bg-white/5 p-1 rounded-lg border border-white/10">
+                        <Button
+                            variant="ghost"
+                            size="icon"
+                            onClick={() => setSimulationMode(simulationMode === "good" ? null : "good")}
+                            className={cn(
+                                "h-8 w-8 rounded transition-all",
+                                simulationMode === "good"
+                                    ? "bg-green-500/20 text-green-300 ring-1 ring-green-500 shadow-[0_0_10px_rgba(34,197,94,0.3)]"
+                                    : "text-gray-400 hover:text-green-300 hover:bg-green-500/10"
+                            )}
+                            title="Simulate Good Health (Green)"
+                        >
+                            <div className="h-3 w-3 rounded-full bg-green-500" />
+                        </Button>
+                        <Button
+                            variant="ghost"
+                            size="icon"
+                            onClick={() => setSimulationMode(simulationMode === "fair" ? null : "fair")}
+                            className={cn(
+                                "h-8 w-8 rounded transition-all",
+                                simulationMode === "fair"
+                                    ? "bg-yellow-500/20 text-yellow-300 ring-1 ring-yellow-500 shadow-[0_0_10px_rgba(234,179,8,0.3)]"
+                                    : "text-gray-400 hover:text-yellow-300 hover:bg-yellow-500/10"
+                            )}
+                            title="Simulate Mediocre Health (Yellow)"
+                        >
+                            <div className="h-3 w-3 rounded-full bg-yellow-500" />
+                        </Button>
+                        <Button
+                            variant="ghost"
+                            size="icon"
+                            onClick={() => setSimulationMode(simulationMode === "poor" ? null : "poor")}
+                            className={cn(
+                                "h-8 w-8 rounded transition-all",
+                                simulationMode === "poor"
+                                    ? "bg-red-500/20 text-red-300 ring-1 ring-red-500 shadow-[0_0_10px_rgba(239,68,68,0.3)]"
+                                    : "text-gray-400 hover:text-red-300 hover:bg-red-500/10"
+                            )}
+                            title="Simulate Poor Health (Red)"
+                        >
+                            <div className="h-3 w-3 rounded-full bg-red-500" />
+                        </Button>
+
+                        {/* Stop Button */}
+                        <div className="w-px h-4 bg-white/10 mx-1" />
+                        <Button
+                            variant="ghost"
+                            size="icon"
+                            onClick={() => setSimulationMode(null)}
+                            disabled={!simulationMode}
+                            className={cn(
+                                "h-8 w-8 rounded transition-all",
+                                !simulationMode
+                                    ? "text-gray-600 cursor-not-allowed opacity-50"
+                                    : "text-rose-400 hover:text-rose-300 hover:bg-rose-500/10"
+                            )}
+                            title="Stop Simulation"
+                        >
+                            <Square className="h-3 w-3 fill-current" />
+                        </Button>
+                    </div>
+
+                    {/* ESP32 Configuration */}
+                    <div className="flex items-center gap-2">
+                        <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => setShowEsp32Config(!showEsp32Config)}
+                            className={cn(
+                                "transition-all duration-300",
+                                esp32Url.trim()
+                                    ? "border-cyan-500/50 bg-cyan-500/20 text-cyan-300"
+                                    : "border-white/20 text-gray-400 hover:bg-white/10"
+                            )}
+                            title={esp32Url.trim() ? `ESP32: ${esp32Url}` : "Configure ESP32"}
+                        >
+                            <Wifi className="h-4 w-4" />
+                        </Button>
+
+                        {showEsp32Config && (
+                            <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-black/50 border border-white/10">
+                                <input
+                                    type="text"
+                                    placeholder="http://192.168.x.x/data"
+                                    value={esp32Url}
+                                    onChange={(e) => handleEsp32UrlChange(e.target.value)}
+                                    className="bg-transparent border-none outline-none text-sm text-white placeholder:text-gray-500 w-48"
+                                />
+                                {esp32Url && (
+                                    <button
+                                        onClick={() => handleEsp32UrlChange("")}
+                                        className="text-gray-400 hover:text-white"
+                                    >
+                                        <X className="h-3 w-3" />
+                                    </button>
+                                )}
+                            </div>
+                        )}
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                        <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={handleSimulate}
+                            disabled={isSimulating || isLoading || !!simulationMode}
+                            className="border-cyan-500/30 text-cyan-400 hover:bg-cyan-500/10 hover:border-cyan-500/50"
+                        >
+                            <Play className={cn("h-4 w-4 mr-2", isSimulating && "animate-pulse")} />
+                            {isSimulating ? "Simulating..." : "Manual"}
+                        </Button>
+                        <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={handleRefresh}
+                            disabled={isLoading}
+                            className="border-white/20 text-white hover:bg-white/10"
+                        >
+                            <RefreshCw className={cn("h-4 w-4 mr-2", isLoading && "animate-spin")} />
+                            Refresh
+                        </Button>
+                    </div>
+                </div>
             </div>
+
+            {/* Simulation Feedback Display */}
+            {lastSentData && simulationMode && (
+                <div className="flex items-center gap-4 px-4 py-2 bg-indigo-500/10 border border-indigo-500/20 rounded-lg animate-in fade-in slide-in-from-top-2">
+                    <div className="flex items-center gap-2">
+                        <Activity className="h-4 w-4 text-indigo-400 animate-pulse" />
+                        <span className="text-sm text-indigo-300 font-medium">
+                            Sending {lastSentData.mode.toUpperCase()} profile to ESP32...
+                        </span>
+                    </div>
+                    <div className="h-4 w-px bg-white/10" />
+                    <div className="text-xs text-gray-400 font-mono">
+                        Vib: <span className="text-white">{lastSentData.vibration.toFixed(2)}</span> |
+                        Temp: <span className="text-white">{lastSentData.temperature.toFixed(1)}°C</span> |
+                        Machines: {lastSentData.machineCount}
+                    </div>
+                    {esp32Url && (
+                        <>
+                            <div className="h-4 w-px bg-white/10" />
+                            <div className="flex items-center gap-1 text-xs text-green-400">
+                                <Wifi className="h-3 w-3" />
+                                <span>Connected</span>
+                            </div>
+                        </>
+                    )}
+                    {!esp32Url && (
+                        <>
+                            <div className="h-4 w-px bg-white/10" />
+                            <div className="flex items-center gap-1 text-xs text-yellow-400">
+                                <AlertCircle className="h-3 w-3" />
+                                <span>No ESP32 URL set</span>
+                            </div>
+                        </>
+                    )}
+
+                    {lastSentData.fullPayload && (
+                        <div className="ml-auto">
+                            <details className="relative group">
+                                <summary className="list-none cursor-pointer flex items-center gap-1 text-xs text-indigo-300 hover:text-indigo-200 bg-indigo-500/10 px-2 py-1 rounded">
+                                    <span className="font-mono">JSON</span>
+                                </summary>
+                                <div className="absolute top-8 right-0 w-[400px] max-h-[300px] overflow-auto bg-gray-900 border border-white/10 rounded-lg p-3 shadow-xl z-50">
+                                    <pre className="text-[10px] text-gray-300 font-mono whitespace-pre-wrap">
+                                        {JSON.stringify(lastSentData.fullPayload, null, 2)}
+                                    </pre>
+                                </div>
+                            </details>
+                        </div>
+                    )}
+                </div>
+            )}
 
             {/* Status Summary */}
             {machines.length > 0 && (
@@ -246,13 +577,27 @@ export default function MachinesPage() {
                                     key={machine.machineId}
                                     layout
                                     initial={{ opacity: 0, scale: 0.95 }}
-                                    animate={{ opacity: 1, scale: 1 }}
+                                    animate={{
+                                        opacity: 1,
+                                        scale: 1,
+                                        boxShadow: changedMachines.has(machine.machineId)
+                                            ? "0 0 30px rgba(34, 211, 238, 0.6), 0 0 60px rgba(34, 211, 238, 0.3)"
+                                            : "none"
+                                    }}
                                     exit={{ opacity: 0, scale: 0.95 }}
-                                    transition={{ duration: 0.3, delay: index * 0.05 }}
+                                    transition={{
+                                        duration: 0.3,
+                                        delay: index * 0.05,
+                                        boxShadow: { duration: 0.5 }
+                                    }}
+                                    className={cn(
+                                        "rounded-xl overflow-hidden",
+                                        changedMachines.has(machine.machineId) && "ring-2 ring-cyan-400/50"
+                                    )}
                                 >
                                     <SpotlightCard
                                         spotlightColor={styles.spotlight}
-                                        borderColor={styles.border}
+                                        borderColor={changedMachines.has(machine.machineId) ? "rgba(34, 211, 238, 0.5)" : styles.border}
                                         backgroundColor={styles.bg}
                                         className="w-full cursor-pointer"
                                         onClick={() => handleCardClick(machine)}
