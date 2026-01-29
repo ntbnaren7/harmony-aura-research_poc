@@ -162,6 +162,39 @@ async def register_machine(
     )
 
 
+@router.post("/seed")
+async def seed_machines(db: Session = Depends(get_db)):
+    """
+    Seed the database with initial machines for demo/testing.
+    Creates 6 machines if none exist.
+    """
+    existing = db.query(Machine).count()
+    if existing >= 6:
+        return {"status": "skipped", "message": f"{existing} machines already exist"}
+    
+    # Define seed machines
+    seed_data = [
+        {"machine_id": "MC-001", "name": "Tower Crane Alpha", "type": "CRANE", "model": "TC-500", "serial_number": "SN-TC-2024-001"},
+        {"machine_id": "MC-002", "name": "Excavator Bravo", "type": "EXCAVATOR", "model": "EX-320", "serial_number": "SN-EX-2024-002"},
+        {"machine_id": "MC-003", "name": "Wheel Loader Charlie", "type": "LOADER", "model": "WL-250", "serial_number": "SN-WL-2024-003"},
+        {"machine_id": "MC-004", "name": "Drill Rig Delta", "type": "DRILL", "model": "DR-180", "serial_number": "SN-DR-2024-004"},
+        {"machine_id": "MC-005", "name": "Air Compressor Echo", "type": "COMPRESSOR", "model": "AC-150", "serial_number": "SN-AC-2024-005"},
+        {"machine_id": "MC-006", "name": "Generator Foxtrot", "type": "GENERATOR", "model": "GN-200", "serial_number": "SN-GN-2024-006"},
+    ]
+    
+    created = 0
+    for data in seed_data:
+        existing_machine = db.query(Machine).filter(Machine.machine_id == data["machine_id"]).first()
+        if not existing_machine:
+            machine = Machine(**data, is_active=True)
+            db.add(machine)
+            created += 1
+    
+    db.commit()
+    
+    return {"status": "success", "message": f"Created {created} machines", "total": db.query(Machine).count()}
+
+
 @router.get("", response_model=MachineListResponse)
 async def get_machines(
     active_only: bool = Query(True, description="Only return active machines"),
@@ -636,23 +669,33 @@ async def simulate_machine_telemetry(
 async def simulate_all_machines(
     background_tasks: BackgroundTasks,
     esp32_url: Optional[str] = Query(None, description="Optional ESP32 URL to send data for computation"),
-    target_state: Optional[str] = Query(None, description="Target state bias: good, fair, or poor"),
+    target_state: Optional[str] = Query(None, description="Target state: good, fair, poor, or 'diverse' for mixed"),
     db: Session = Depends(get_db)
 ):
     """
     Generate simulated telemetry for ALL active machines.
-    Useful for testing and demos.
+    Use target_state='diverse' for realistic mixed conditions.
     """
     machines = db.query(Machine).filter(Machine.is_active == True).all()
     
     if not machines:
         raise HTTPException(status_code=404, detail="No active machines found")
     
+    # Define diverse states: 2 good, 2 fair, 2 poor for realistic dashboard
+    diverse_states = ["good", "good", "fair", "fair", "poor", "poor"]
+    random.shuffle(diverse_states)
+    
     result = []
     last_payload = None
     from ..schemas.machine import MachineTelemetryCreate
     
-    for machine in machines:
+    for i, machine in enumerate(machines):
+        # Determine effective state for this machine
+        if target_state == "diverse" or target_state is None:
+            machine_target_state = diverse_states[i % len(diverse_states)]
+        else:
+            machine_target_state = target_state
+            
         # Get the latest telemetry to base increments on
         latest_telemetry = db.query(MachineTelemetry).filter(
             MachineTelemetry.machine_id == machine.machine_id
@@ -668,10 +711,10 @@ async def simulate_all_machines(
                 "oil_pressure": latest_telemetry.oil_pressure,
                 "operating_hours": latest_telemetry.operating_hours,
             }
-            simulated_data = generate_incremental_telemetry(machine.type, current_values, target_state)
+            simulated_data = generate_incremental_telemetry(machine.type, current_values, machine_target_state)
         else:
             profile = TYPE_PROFILES.get(machine.type.upper(), TYPE_PROFILES["CRANE"])
-            simulated_data = generate_comprehensive_telemetry(profile, None, target_state)
+            simulated_data = generate_comprehensive_telemetry(profile, None, machine_target_state)
         
         telemetry_input = MachineTelemetryCreate(
             machine_id=machine.machine_id,

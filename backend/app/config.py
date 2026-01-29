@@ -19,6 +19,12 @@ class Settings(BaseSettings):
     # CORS
     cors_origins: str = "http://localhost:3000"
     
+    # Twilio (Emergency Alerts)
+    twilio_account_sid: str = ""
+    twilio_auth_token: str = ""
+    twilio_from_number: str = ""
+    supervisor_phone: str = ""
+    
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

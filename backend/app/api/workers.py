@@ -12,7 +12,11 @@ from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks
 from sqlalchemy.orm import Session
 from sqlalchemy import desc
 
+from twilio.rest import Client
+import logging
+
 from ..database import get_db
+from ..config import get_settings
 from ..models.worker import Worker, WorkerVitals
 from ..schemas.worker import (
     WorkerVitalsCreate,
@@ -327,25 +331,34 @@ async def simulate_worker_vitals(
 
 
 @router.post("/simulate-all", response_model=WorkerListResponse)
-@router.post("/simulate-all", response_model=WorkerListResponse)
 async def simulate_all_workers(
     background_tasks: BackgroundTasks,
     esp32_url: Optional[str] = Query(None, description="Optional ESP32 URL"),
-    target_state: Optional[str] = Query(None, description="Target: good, fair, poor"),
+    target_state: Optional[str] = Query(None, description="Target: good, fair, poor, or 'diverse' for mixed conditions"),
     db: Session = Depends(get_db)
 ):
-    """Simulate vitals for ALL active workers"""
+    """Simulate vitals for ALL active workers. Use target_state='diverse' for realistic mixed conditions."""
     workers = db.query(Worker).filter(Worker.is_active == True).limit(6).all()
     if not workers:
         raise HTTPException(status_code=404, detail="No active workers found")
+    
+    # Define diverse states: 2 good, 2 fair, 2 poor for realistic dashboard
+    diverse_states = ["good", "good", "fair", "fair", "poor", "poor"]
+    random.shuffle(diverse_states)  # Randomize assignment
         
     results = []
     
-    for worker in workers:
+    for i, worker in enumerate(workers):
         # Incremental generation
         latest = db.query(WorkerVitals).filter(
             WorkerVitals.worker_id == worker.worker_id
         ).order_by(desc(WorkerVitals.timestamp)).first()
+        
+        # Determine effective state for this worker
+        if target_state == "diverse" or target_state is None:
+            worker_target_state = diverse_states[i % len(diverse_states)]
+        else:
+            worker_target_state = target_state
         
         current_values = {}
         if latest:
@@ -355,9 +368,9 @@ async def simulate_all_workers(
                 "temperature": latest.temperature,
                 "machine_stress_index": latest.machine_stress_index
             }
-            simulated = generate_incremental_worker_telemetry(current_values, target_state)
+            simulated = generate_incremental_worker_telemetry(current_values, worker_target_state)
         else:
-            simulated = generate_comprehensive_worker_telemetry(None, target_state)
+            simulated = generate_comprehensive_worker_telemetry(None, worker_target_state)
             
         # Create DB record
         db_vitals = WorkerVitals(
@@ -484,6 +497,39 @@ async def register_worker(
     )
 
 
+@router.post("/seed")
+async def seed_workers(db: Session = Depends(get_db)):
+    """
+    Seed the database with initial workers for demo/testing.
+    Creates 6 workers if none exist.
+    """
+    existing = db.query(Worker).count()
+    if existing >= 6:
+        return {"status": "skipped", "message": f"{existing} workers already exist"}
+    
+    # Define seed workers
+    seed_data = [
+        {"worker_id": "WK-7822", "name": "Rajesh Kumar", "department": "Heavy Machinery"},
+        {"worker_id": "WK-3451", "name": "Amit Singh", "department": "Excavation"},
+        {"worker_id": "WK-5678", "name": "Priya Sharma", "department": "Safety Inspection"},
+        {"worker_id": "WK-1234", "name": "Suresh Patel", "department": "Crane Operations"},
+        {"worker_id": "WK-9012", "name": "Deepak Verma", "department": "Drilling"},
+        {"worker_id": "WK-6543", "name": "Anita Gupta", "department": "Site Management"},
+    ]
+    
+    created = 0
+    for data in seed_data:
+        existing_worker = db.query(Worker).filter(Worker.worker_id == data["worker_id"]).first()
+        if not existing_worker:
+            worker = Worker(**data, is_active=True)
+            db.add(worker)
+            created += 1
+    
+    db.commit()
+    
+    return {"status": "success", "message": f"Created {created} workers", "total": db.query(Worker).count()}
+
+
 @router.get("", response_model=WorkerListResponse)
 async def get_workers(
     active_only: bool = Query(True, description="Only return active workers"),
@@ -606,3 +652,167 @@ async def issue_break(
     db.commit()
     
     return {"status": "success", "message": f"Break issued for {worker_id}"}
+@router.post("/{worker_id}/emergency")
+async def trigger_emergency(
+    worker_id: str,
+    db: Session = Depends(get_db)
+):
+    """
+    Trigger a manual EMERGENCY for a worker:
+    1. Sets vitals to critical (HIGH risk)
+    2. Triggers an actual Twilio voice call to the supervisor
+    """
+    settings = get_settings()
+    worker = db.query(Worker).filter(Worker.worker_id == worker_id).first()
+    if not worker:
+        raise HTTPException(status_code=404, detail="Worker not found")
+    
+    # 1. Create critical vitals
+    emergency_vitals = WorkerVitals(
+        worker_id=worker_id,
+        heart_rate=145,
+        hrv=12,
+        temperature=39.2,
+        jerk_count=15,
+        machine_stress_index=95,
+        vibration_rms=4.5,
+        cis_score=15,
+        risk_state="HIGH",
+        break_flag=False,
+        timestamp=datetime.utcnow()
+    )
+    db.add(emergency_vitals)
+    db.commit()
+    
+    # 2. Trigger Twilio Voice Call
+    if settings.twilio_account_sid and settings.twilio_auth_token:
+        try:
+            client = Client(settings.twilio_account_sid, settings.twilio_auth_token)
+            
+            # Create a simple TwiML for the call message
+            twiml_content = f"""
+            <Response>
+                <Say voice="alice">Emergency Alert. Worker {worker.name} with ID {worker_id} has reached a critical health state. Immediate intervention required.</Say>
+                <Pause length="1"/>
+                <Say voice="alice">I repeat. Emergency for {worker.name}. Please check the Harmony Aura dashboard immediately.</Say>
+            </Response>
+            """
+            
+            call = client.calls.create(
+                to=settings.supervisor_phone,
+                from_=settings.twilio_from_number,
+                twiml=twiml_content
+            )
+            return {"status": "emergency_triggered", "call_sid": call.sid, "worker": worker.name}
+        except Exception as e:
+            logging.error(f"Twilio call failed: {e}")
+            return {"status": "emergency_triggered", "error": str(e), "worker": worker.name}
+    
+    return {"status": "emergency_triggered", "message": "Twilio not configured, only DB updated", "worker": worker.name}
+
+
+@router.post("/hardware-poll", response_model=WorkerResponse)
+async def poll_hardware_data(
+    fetcher_url: str = Query(..., description="URL of the fetching ESP32 e.g. http://10.30.100.84:8000/machine/data"),
+    worker_id: str = Query("WK-7822", description="ID of the worker to assign hardware data to"),
+    db: Session = Depends(get_db)
+):
+    """
+    Hardware-in-the-Loop Bridge:
+    1. Fetches raw sensor data from the ESP32 Fetcher
+    2. Computes CIS Score and Risk State here in the Backend (Brain)
+    3. Updates the Worker's record
+    4. Returns the processed state (which can be sent to OLED)
+    """
+    # 1. Fetch Data from ESP32
+    print(f"--- HARDWARE POLL: Connecting to {fetcher_url} ---")
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.get(fetcher_url)
+            print(f"--- HARDWARE POLL: Status {response.status_code} ---")
+            
+            if response.status_code != 200:
+                print(f"--- HARDWARE POLL: Error {response.text} ---")
+                raise HTTPException(status_code=502, detail=f"ESP32 returned status {response.status_code}")
+            
+            raw_data = response.json()
+            print(f"--- HARDWARE POLL: Data received: {str(raw_data)[:100]}... ---")
+            
+            # Extract relevant vitals from the nested structure
+            # Structure matches the simulate-all payload: human -> cardiovascular / physiological_stress
+            try:
+                human = raw_data.get("human", {})
+                cardio = human.get("cardiovascular", {})
+                stress = human.get("physiological_stress", {})
+                
+                heart_rate = float(cardio.get("heart_rate_bpm", 75))
+                hrv = float(cardio.get("heart_rate_variability_ms", 50))
+                temperature = float(stress.get("skin_temperature_c", 36.6))
+                
+                # Mock others if missing
+                jerk_count = 0
+                machine_stress = 50
+                vibration = 0.5
+                
+            except (ValueError, AttributeError) as e:
+                print(f"--- HARDWARE POLL: Parsing Error {e} ---")
+                logging.error(f"Error parsing ESP32 data: {e}")
+                # Fallback to defaults to keep system running
+                heart_rate, hrv, temperature = 75, 50, 36.6
+                
+    except httpx.RequestError as e:
+        print(f"--- HARDWARE POLL: Request Failed: {e} ---")
+        raise HTTPException(status_code=504, detail=f"Failed to reach ESP32: {str(e)}")
+
+    # 2. Compute logic (The "Brain")
+    # We create a temporary object to pass to our calculation logic
+    vitals_input = WorkerVitalsCreate(
+        worker_id=worker_id,
+        heart_rate=heart_rate,
+        hrv=hrv,
+        temperature=temperature,
+        jerk_count=jerk_count,
+        machine_stress_index=machine_stress,
+        vibration_rms=vibration
+    )
+    
+    cis_score = calculate_cis_score(vitals_input)
+    risk_state = determine_risk_state(cis_score)
+    
+    # 3. Update Database
+    worker = db.query(Worker).filter(Worker.worker_id == worker_id).first()
+    if not worker:
+        worker = Worker(worker_id=worker_id, name="Hardware Worker", is_active=True)
+        db.add(worker)
+        db.commit()
+    
+    db_vitals = WorkerVitals(
+        worker_id=worker_id,
+        heart_rate=heart_rate,
+        hrv=hrv,
+        temperature=temperature,
+        jerk_count=jerk_count,
+        machine_stress_index=machine_stress,
+        vibration_rms=vibration,
+        cis_score=cis_score,
+        risk_state=risk_state,
+        break_flag=False,
+    )
+    db.add(db_vitals)
+    db.commit()
+    db.refresh(db_vitals)
+    
+    # Return processed state 
+    return WorkerResponse(
+        worker_id=worker.worker_id,
+        name=worker.name,
+        department=worker.department,
+        is_active=worker.is_active,
+        created_at=worker.created_at,
+        heart_rate=heart_rate,
+        hrv=hrv,
+        temperature=temperature,
+        cis_score=cis_score,
+        risk_state=risk_state,
+        last_updated=db_vitals.timestamp
+    )

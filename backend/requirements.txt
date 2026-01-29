@@ -7,3 +7,4 @@ pydantic-settings==2.1.0
 python-dotenv==1.0.0
 alembic==1.13.1
 httpx==0.26.0
+twilio==8.10.0
