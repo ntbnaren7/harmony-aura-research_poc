@@ -52,7 +52,8 @@ export default function DashboardPage() {
 
     const [workers, setWorkers] = useState<WorkerVitals[]>([]);
     const [isLoading, setIsLoading] = useState(true);
-    const [simulationMode, setSimulationMode] = useState<"good" | "fair" | "poor" | null>(null);
+    // Start with 'diverse' mode for auto real-time simulation
+    const [simulationMode, setSimulationMode] = useState<"good" | "fair" | "poor" | "diverse" | "hardware" | null>("diverse");
     const [selectedWorker, setSelectedWorker] = useState<WorkerVitals | null>(null);
     const [isModalOpen, setIsModalOpen] = useState(false);
     const [loadingBreaks, setLoadingBreaks] = useState<Set<string>>(new Set());
@@ -78,12 +79,16 @@ export default function DashboardPage() {
     const [showEsp32Config, setShowEsp32Config] = useState(false);
 
     const isSimulating = !!simulationMode;
-    const handleSimulate = () => setSimulationMode("good");
+    const handleSimulate = () => setSimulationMode("diverse");
 
-    // Load persisted ESP32 URL
+    // Load persisted ESP32 URL - Default to the hardware fetcher IP if not set
     useEffect(() => {
         const saved = localStorage.getItem("esp32_url_workers");
-        if (saved) setEsp32Url(saved);
+        if (saved) {
+            setEsp32Url(saved);
+        } else {
+            setEsp32Url("http://10.30.100.84:8000/machine/data");
+        }
     }, []);
 
     const handleEsp32UrlChange = (url: string) => {
@@ -100,9 +105,19 @@ export default function DashboardPage() {
 
         const simulateAndRefresh = async () => {
             try {
-                let url = `${API_BASE_URL}/api/workers/simulate-all?target_state=${simulationMode}`;
-                if (esp32Url.trim()) {
-                    url += `&esp32_url=${encodeURIComponent(esp32Url.trim())}`;
+                let url;
+
+                if (simulationMode === "hardware") {
+                    // Use hardware polling endpoint
+                    // Default to the known ESP32 IP if the user hasn't typed one
+                    const fetcherUrl = esp32Url.trim() || "http://10.30.100.84:8000/machine/data";
+                    url = `${API_BASE_URL}/api/workers/hardware-poll?fetcher_url=${encodeURIComponent(fetcherUrl)}`;
+                } else {
+                    // Use simulation endpoint
+                    url = `${API_BASE_URL}/api/workers/simulate-all?target_state=${simulationMode}`;
+                    if (esp32Url.trim()) {
+                        url += `&esp32_url=${encodeURIComponent(esp32Url.trim())}`;
+                    }
                 }
 
                 const response = await fetch(url, { method: "POST" });
@@ -120,14 +135,39 @@ export default function DashboardPage() {
                             fullPayload: data.last_esp32_payload
                         });
                     }
+                } else if (simulationMode === "hardware" && data.worker_id) {
+                    // Handle single worker response from hardware poll
+                    const hardwareWorker = transformWorkerResponse(data);
+
+                    // Merge with existing workers, updating the hardware worker or adding it
+                    setWorkers(prev => {
+                        const exists = prev.find(w => w.workerId === hardwareWorker.workerId);
+                        if (exists) {
+                            return prev.map(w => w.workerId === hardwareWorker.workerId ? hardwareWorker : w);
+                        }
+                        return [hardwareWorker, ...prev.slice(0, 5)]; // Keep list size manageable
+                    });
+
+                    setLastSentData({
+                        timestamp: new Date(),
+                        mode: "hardware",
+                        workerCount: 1,
+                        fullPayload: data
+                    });
                 }
-            } catch (err) {
+            } catch (err: any) {
                 console.error("Simulation failed:", err);
+                if (simulationMode === "hardware") {
+                    // Show error immediately for hardware mode debugging
+                    toast.error("Hardware Connection Failed", {
+                        description: `Could not reach ESP32 at ${esp32Url || "default IP"}`
+                    });
+                }
             }
         };
 
         simulateAndRefresh(); // Immediate call
-        const interval = setInterval(simulateAndRefresh, 2500);
+        const interval = setInterval(simulateAndRefresh, 1500); // Update every 1.5 seconds
         return () => clearInterval(interval);
     }, [simulationMode, esp32Url]);
 
@@ -154,6 +194,23 @@ export default function DashboardPage() {
             next.delete(workerId);
             return next;
         });
+    };
+
+    const handleTriggerSOS = async (workerId: string) => {
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/workers/${workerId}/emergency`, { method: "POST" });
+            const data = await response.json();
+            if (response.ok) {
+                toast.success("Emergency Call Initiated", {
+                    description: `Voice call sent to supervisor for ${data.worker || workerId}`
+                });
+            } else {
+                toast.error("Emergency Call Failed", { description: data.detail || "Database error" });
+            }
+        } catch (err) {
+            console.error("Emergency trigger failed:", err);
+            toast.error("Network Error", { description: "Could not reach emergency server" });
+        }
     };
 
     const highRiskCount = workers.filter((w) => w.riskState === "HIGH").length;
@@ -186,20 +243,58 @@ export default function DashboardPage() {
                     )}
                     {/* Simulation Controls */}
                     <div className="flex items-center bg-black/40 rounded-lg p-1 border border-white/10">
+                        {/* Hardware Link Mode */}
                         <Button
                             variant="ghost"
                             size="icon"
-                            onClick={() => setSimulationMode(simulationMode === "poor" ? null : "poor")}
+                            onClick={() => setSimulationMode(simulationMode === "hardware" ? null : "hardware")}
+                            className={cn(
+                                "h-8 w-8 rounded transition-all mr-1",
+                                simulationMode === "hardware"
+                                    ? "bg-cyan-500/20 text-cyan-300 ring-1 ring-cyan-500 shadow-[0_0_10px_rgba(34,211,238,0.3)]"
+                                    : "text-gray-400 hover:text-cyan-300 hover:bg-cyan-500/10"
+                            )}
+                            title="Hardware Link (Fetch from ESP32)"
+                        >
+                            <Wifi className="h-4 w-4" />
+                        </Button>
+
+                        <div className="w-px h-4 bg-white/10 mx-1" />
+
+                        {/* Diverse Mode (Mixed) */}
+                        <Button
+                            variant="ghost"
+                            size="icon"
+                            onClick={() => setSimulationMode(simulationMode === "diverse" ? null : "diverse")}
                             className={cn(
                                 "h-8 w-8 rounded transition-all",
-                                simulationMode === "poor"
+                                simulationMode === "diverse"
+                                    ? "bg-purple-500/20 text-purple-300 ring-1 ring-purple-500 shadow-[0_0_10px_rgba(168,85,247,0.3)]"
+                                    : "text-gray-400 hover:text-purple-300 hover:bg-purple-500/10"
+                            )}
+                            title="Auto Simulate (Mixed Conditions)"
+                        >
+                            <div className="h-3 w-3 rounded-full bg-gradient-to-br from-green-400 via-yellow-400 to-red-400" />
+                        </Button>
+
+                        <div className="w-px h-4 bg-white/10 mx-1" />
+
+                        {/* All Good (Low Risk) */}
+                        <Button
+                            variant="ghost"
+                            size="icon"
+                            onClick={() => setSimulationMode(simulationMode === "good" ? null : "good")}
+                            className={cn(
+                                "h-8 w-8 rounded transition-all",
+                                simulationMode === "good"
                                     ? "bg-green-500/20 text-green-300 ring-1 ring-green-500 shadow-[0_0_10px_rgba(34,197,94,0.3)]"
                                     : "text-gray-400 hover:text-green-300 hover:bg-green-500/10"
                             )}
-                            title="Simulate Critical Health (Green)"
+                            title="Simulate All Good (Low Risk)"
                         >
                             <div className="h-3 w-3 rounded-full bg-green-500" />
                         </Button>
+                        {/* All Fair (Medium Risk) */}
                         <Button
                             variant="ghost"
                             size="icon"
@@ -210,21 +305,22 @@ export default function DashboardPage() {
                                     ? "bg-yellow-500/20 text-yellow-300 ring-1 ring-yellow-500 shadow-[0_0_10px_rgba(234,179,8,0.3)]"
                                     : "text-gray-400 hover:text-yellow-300 hover:bg-yellow-500/10"
                             )}
-                            title="Simulate Fair Health (Yellow)"
+                            title="Simulate All Fair (Medium Risk)"
                         >
                             <div className="h-3 w-3 rounded-full bg-yellow-500" />
                         </Button>
+                        {/* All Poor (High Risk) */}
                         <Button
                             variant="ghost"
                             size="icon"
-                            onClick={() => setSimulationMode(simulationMode === "good" ? null : "good")}
+                            onClick={() => setSimulationMode(simulationMode === "poor" ? null : "poor")}
                             className={cn(
                                 "h-8 w-8 rounded transition-all",
-                                simulationMode === "good"
+                                simulationMode === "poor"
                                     ? "bg-red-500/20 text-red-300 ring-1 ring-red-500 shadow-[0_0_10px_rgba(239,68,68,0.3)]"
                                     : "text-gray-400 hover:text-red-300 hover:bg-red-500/10"
                             )}
-                            title="Simulate Normal Health (Red)"
+                            title="Simulate All Poor (High Risk)"
                         >
                             <div className="h-3 w-3 rounded-full bg-red-500" />
                         </Button>
@@ -364,7 +460,7 @@ export default function DashboardPage() {
                     <div className="flex items-center gap-2">
                         <div className="h-2 w-2 rounded-full bg-indigo-400 animate-pulse" />
                         <span className="text-sm font-medium text-indigo-300">
-                            {simulationMode === "good" ? "Normal" : simulationMode === "fair" ? "Warning" : "Critical"} Mode
+                            {simulationMode === "hardware" ? "Hardware (Live Link)" : simulationMode === "diverse" ? "Realtime (Mixed)" : simulationMode === "good" ? "All Good" : simulationMode === "fair" ? "All Fair" : "All Critical"} Mode
                         </span>
                     </div>
 
@@ -447,7 +543,13 @@ export default function DashboardPage() {
                 </div>
             )}
 
-            <WorkerDetailModal worker={selectedWorker} isOpen={isModalOpen} onClose={handleCloseModal} onIssueBreak={handleIssueBreak} />
+            <WorkerDetailModal
+                worker={selectedWorker}
+                isOpen={isModalOpen}
+                onClose={handleCloseModal}
+                onIssueBreak={handleIssueBreak}
+                onTriggerSOS={handleTriggerSOS}
+            />
         </div>
     );
 }

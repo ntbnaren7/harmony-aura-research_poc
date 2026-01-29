@@ -21,6 +21,7 @@ import {
     Coffee,
     AlertTriangle,
     X,
+    Phone,
 } from "lucide-react";
 import {
     LineChart,
@@ -42,6 +43,7 @@ interface WorkerDetailModalProps {
     isOpen: boolean;
     onClose: () => void;
     onIssueBreak: (workerId: string) => void;
+    onTriggerSOS?: (workerId: string) => void;
 }
 
 // Generate mock historical data for charts
@@ -80,6 +82,7 @@ export function WorkerDetailModal({
     isOpen,
     onClose,
     onIssueBreak,
+    onTriggerSOS,
 }: WorkerDetailModalProps) {
     const [selectedMetric, setSelectedMetric] = useState<"heartRate" | "hrv" | "temperature" | "machineStress">("heartRate");
 
@@ -309,6 +312,14 @@ export function WorkerDetailModal({
                             Last updated: {new Date(worker.lastUpdated).toLocaleTimeString()}
                         </div>
                         <div className="flex gap-3">
+                            <Button
+                                variant="destructive"
+                                onClick={() => onTriggerSOS?.(worker.workerId)}
+                                className="bg-red-500/10 border-red-500/50 text-red-500 hover:bg-red-500 hover:text-white transition-all duration-300 shadow-[0_0_15px_rgba(239,68,68,0.2)] hover:shadow-[0_0_20px_rgba(239,68,68,0.4)]"
+                            >
+                                <Phone className="h-4 w-4 mr-2 animate-pulse" />
+                                Trigger SOS
+                            </Button>
                             <Button variant="outline" onClick={onClose} className="border-white/20 text-white hover:bg-white/10">
                                 Close
                             </Button>
